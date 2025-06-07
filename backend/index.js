@@ -4,6 +4,7 @@ import { initializeApp } from "firebase/app";
 import { getDatabase, ref, get } from "firebase/database";
 import { getAuth, signInAnonymously } from "firebase/auth";
 import fs from "fs/promises";
+import cors from "cors";
 import path from "path";
 import { fileURLToPath } from "url";
 
@@ -11,25 +12,27 @@ import { fileURLToPath } from "url";
 const __filename = fileURLToPath(import.meta.url);
 const __dirname = path.dirname(__filename);
 
-// ── Path to your JSON log file ────────────────────────────────────────────────
+// ── Paths to your JSON files ───────────────────────────────────────────────────
 const DATA_FILE = path.join(__dirname, "data.json");
-let logArray = [];
+const USERS_FILE = path.join(__dirname, "users.json");
 
-// ── Ensure data.json exists & load its contents ───────────────────────────────
+let logArray = [];
+let usersArray = [];
+
+// ── Initialize & load any existing log file ────────────────────────────────────
 async function initLogFile() {
-  try {
-    // Create file if it doesn’t exist
-    await fs
-      .access(DATA_FILE)
-      .catch(() => fs.writeFile(DATA_FILE, "[]", "utf8"));
-    // Load into memory
-    const raw = await fs.readFile(DATA_FILE, "utf8");
-    const parsed = JSON.parse(raw);
-    logArray = Array.isArray(parsed) ? parsed : [];
-  } catch (err) {
-    console.error("❌ Failed to initialize log file:", err);
-    process.exit(1);
-  }
+  await fs.access(DATA_FILE).catch(() => fs.writeFile(DATA_FILE, "[]", "utf8"));
+  const raw = await fs.readFile(DATA_FILE, "utf8");
+  logArray = Array.isArray(JSON.parse(raw)) ? JSON.parse(raw) : [];
+}
+
+// ── Initialize & load any existing users file ──────────────────────────────────
+async function initUsersFile() {
+  await fs
+    .access(USERS_FILE)
+    .catch(() => fs.writeFile(USERS_FILE, "[]", "utf8"));
+  const raw = await fs.readFile(USERS_FILE, "utf8");
+  usersArray = Array.isArray(JSON.parse(raw)) ? JSON.parse(raw) : [];
 }
 
 // ── Your Firebase web‐SDK config ───────────────────────────────────────────────
@@ -55,7 +58,7 @@ const dataRef = ref(db, "/"); // ← root of your RTDB
 let previousKey = null;
 let deviceActive = false;
 
-// ── Fetch from RTDB, determine deviceActive, return data ───────────────────────
+// ── Fetch from RTDB, detect activity, return data ─────────────────────────────
 async function refreshStatus() {
   const snap = await get(dataRef);
   const d = snap.val() || {};
@@ -81,7 +84,7 @@ function getColomboTimeIso() {
   );
 }
 
-// ── Periodic task: every 2s, fetch, log status, and append to data.json ─────
+// ── Periodic task: every 2s, refresh & log, then append to data.json ─────────
 async function periodicLog() {
   try {
     const data = await refreshStatus();
@@ -97,36 +100,37 @@ async function periodicLog() {
       }`
     );
 
-    // Append to memory, cap to last 1000
+    // Append & cap to last 1000
     logArray.push(record);
-    if (logArray.length > 1000) {
-      logArray = logArray.slice(-1000);
-    }
+    if (logArray.length > 1000) logArray = logArray.slice(-1000);
 
-    // Persist the entire array
+    // Persist
     await fs.writeFile(DATA_FILE, JSON.stringify(logArray, null, 2), "utf8");
-    console.log(`📄 data.json now contains ${logArray.length} records`);
   } catch (err) {
     console.error("❌ periodicLog error:", err);
   }
 }
 
-// ── Start the server & periodic logging ───────────────────────────────────────
+// ── Boot up everything ─────────────────────────────────────────────────────────
 async function start() {
+  // 1) Init files
   await initLogFile();
+  await initUsersFile();
 
-  // Anonymous sign-in (ensure your RTDB rules allow auth != null)
+  // 2) Anonymous sign-in to RTDB (ensure your rules allow auth != null)
   await signInAnonymously(auth);
   console.log("✅ Signed in anonymously to RTDB");
 
-  // Kick off periodic logging every 2 seconds
+  // 3) Kick off periodic device logging
   await periodicLog();
   setInterval(periodicLog, 2000);
 
-  // Express API
+  // 4) Express setup
   const app = express();
+  app.use(cors());
+  app.use(express.json());
 
-  // Latest single record
+  // • GET latest device data
   app.get("/deviceLivedata", async (_, res) => {
     try {
       const data = await refreshStatus();
@@ -141,15 +145,52 @@ async function start() {
     }
   });
 
-  // Return full log array
+  // • GET all logged device records
   app.get("/alldata", (_, res) => {
     res.json(logArray);
   });
 
+  // • POST add a new user
+  //   Expects JSON body: { userName, accountNumber, device, address, tp, userId }
+  app.post("/addUser", async (req, res) => {
+    try {
+      const { userName, accountNumber, device, address, tp, userId } = req.body;
+      // Basic validation
+      if (
+        ![userName, accountNumber, device, address, tp, userId].every(
+          (v) => v != null
+        )
+      ) {
+        return res
+          .status(400)
+          .json({ error: "Missing one or more required fields." });
+      }
+
+      const user = { userName, accountNumber, device, address, tp, userId };
+      usersArray.push(user);
+      await fs.writeFile(
+        USERS_FILE,
+        JSON.stringify(usersArray, null, 2),
+        "utf8"
+      );
+      return res.json({ success: true, user });
+    } catch (err) {
+      console.error("❌ /addUser error:", err);
+      return res.status(500).json({ error: err.message });
+    }
+  });
+
+  // • GET view all users
+  app.get("/viewUsers", (_, res) => {
+    res.json(usersArray);
+  });
+
   app.listen(3300, () => {
     console.log("🚀 API listening on http://localhost:3300");
-    console.log("   • GET /deviceLivedata");
-    console.log("   • GET /alldata");
+    console.log("   • GET  /deviceLivedata");
+    console.log("   • GET  /alldata");
+    console.log("   • POST /addUser");
+    console.log("   • GET  /viewUsers");
   });
 }
 

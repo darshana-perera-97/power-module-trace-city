@@ -12,6 +12,7 @@
 
 # data
 /data.json
+/users.json
 
 # production
 /build
