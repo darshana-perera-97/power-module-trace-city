@@ -33,6 +33,7 @@ function generateRandomData() {
     livepower: getRandomInt(0, 100), // live power draw
     totalpower: getRandomInt(0, 500), // total power used
     voltage: getRandomInt(200, 250), // voltage range
+    device: "001", // voltage range
   };
 }
 
